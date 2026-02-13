@@ -7,12 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
-
 	"github.com/chronodrachma/chrd/pkg/config"
 	"github.com/chronodrachma/chrd/pkg/core/blockchain"
 	"github.com/chronodrachma/chrd/pkg/core/consensus"
-	"github.com/chronodrachma/chrd/pkg/core/consensus/randomx"
 	"github.com/chronodrachma/chrd/pkg/core/types"
 	"github.com/chronodrachma/chrd/pkg/miner"
 	"github.com/chronodrachma/chrd/pkg/p2p"
@@ -77,7 +74,7 @@ func startNode(listenAddr, seedAddr string, isMiner bool, minerAddr types.Hash) 
 	var err error
 	
 	// Create a dummy seed for hashing
-	seed := []byte("ChronodrachmaTestnet")
+	// seed := []byte("ChronodrachmaTestnet")
 	
 	// Try loading RandomX (if compiled with it)
 	// Note: We'd need a build tag check here in real code, but for now lets assume validation logic handles it.
@@ -104,7 +101,7 @@ func startNode(listenAddr, seedAddr string, isMiner bool, minerAddr types.Hash) 
 	// because I cannot be 100% sure the environment has the dynamic libs linked right now for *my* `go run`.
 	// I'll add a TODO log.
 	
-	hasher = consensus.NewSha256Hasher() 
+	hasher = consensus.NewSHA256Hasher() 
 	log.Println("WARNING: Using SHA256 hasher for prototype. Use -tags randomx for RandomX.")
 
 	// 2. Initialize Chain
