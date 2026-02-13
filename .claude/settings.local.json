@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(brew:*)",
+      "Bash(go version:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git clone:*)",
+      "WebFetch(domain:cobra.dev)",
+      "WebFetch(domain:mycoralhealth.medium.com)"
+    ]
+  }
+}
