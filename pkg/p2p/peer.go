@@ -75,7 +75,15 @@ func (p *Peer) handleMessage(msg Message) {
 
 	case *MsgTx:
 		log.Printf("Received Tx from %s: %x", p.Conn.RemoteAddr(), m.Tx.ID)
-		// Add to mempool (not implemented in Phase I/II yet, just log)
+		if err := p.Server.Mempool.AddTransaction(m.Tx); err != nil {
+			// If already exists, don't gossip back
+			if err.Error() != "transaction already in mempool" {
+				log.Printf("Failed to add transaction: %v", err)
+			}
+		} else {
+			log.Printf("Added tx %x to mempool, broadcasting...", m.Tx.ID)
+			p.Server.Broadcast(m)
+		}
 	}
 }
 

@@ -8,11 +8,25 @@ import (
 	"github.com/chronodrachma/chrd/pkg/core/types"
 )
 
+func mustNewTestChain(t *testing.T, hasher consensus.Hasher) (*Chain, BlockStore) {
+	store, err := NewBadgerStore("") // In-memory
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	chain, err := NewChain(store, hasher)
+	if err != nil {
+		t.Fatalf("failed to create chain: %v", err)
+	}
+	return chain, store
+}
+
 func TestGenesisBlockCreation(t *testing.T) {
 	hasher := consensus.NewSHA256Hasher()
 	defer hasher.Close()
 
-	chain := NewChain(hasher)
+	chain, store := mustNewTestChain(t, hasher)
+	defer store.Close()
+
 	miner := types.Hash{0x01}
 	now := time.Now()
 
@@ -60,7 +74,7 @@ func TestGenesisBlockCreation(t *testing.T) {
 	if chain.Height() != 0 {
 		t.Errorf("chain height = %d, want 0", chain.Height())
 	}
-	if chain.Tip() != genesis {
+	if chain.Tip().Hash != genesis.Hash {
 		t.Error("chain tip should be the genesis block")
 	}
 	if chain.TotalSupply() != types.BlockReward {
@@ -72,7 +86,9 @@ func TestGenesisDoubleInit(t *testing.T) {
 	hasher := consensus.NewSHA256Hasher()
 	defer hasher.Close()
 
-	chain := NewChain(hasher)
+	chain, store := mustNewTestChain(t, hasher)
+	defer store.Close()
+
 	miner := types.Hash{0x01}
 
 	_, err := chain.InitGenesis(miner, 0, time.Now())
@@ -166,7 +182,9 @@ func TestValidateBlock_InvalidPrevHash(t *testing.T) {
 	hasher := consensus.NewSHA256Hasher()
 	defer hasher.Close()
 
-	chain := NewChain(hasher)
+	chain, store := mustNewTestChain(t, hasher)
+	defer store.Close()
+
 	miner := types.Hash{0x01}
 	genesis, _ := chain.InitGenesis(miner, 0, time.Now())
 
@@ -182,7 +200,9 @@ func TestValidateBlock_InvalidHeight(t *testing.T) {
 	hasher := consensus.NewSHA256Hasher()
 	defer hasher.Close()
 
-	chain := NewChain(hasher)
+	chain, store := mustNewTestChain(t, hasher)
+	defer store.Close()
+
 	miner := types.Hash{0x01}
 	genesis, _ := chain.InitGenesis(miner, 0, time.Now())
 
@@ -204,7 +224,9 @@ func TestValidateBlock_TimestampBeforeParent(t *testing.T) {
 	hasher := consensus.NewSHA256Hasher()
 	defer hasher.Close()
 
-	chain := NewChain(hasher)
+	chain, store := mustNewTestChain(t, hasher)
+	defer store.Close()
+
 	miner := types.Hash{0x01}
 	now := time.Now()
 	genesis, _ := chain.InitGenesis(miner, 0, now)
@@ -227,7 +249,9 @@ func TestValidateBlock_InvalidCoinbaseAmount(t *testing.T) {
 	hasher := consensus.NewSHA256Hasher()
 	defer hasher.Close()
 
-	chain := NewChain(hasher)
+	chain, store := mustNewTestChain(t, hasher)
+	defer store.Close()
+
 	miner := types.Hash{0x01}
 	genesis, _ := chain.InitGenesis(miner, 0, time.Now())
 

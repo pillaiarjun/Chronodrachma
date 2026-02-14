@@ -10,6 +10,7 @@ import (
 	"github.com/chronodrachma/chrd/pkg/config"
 	"github.com/chronodrachma/chrd/pkg/core/blockchain"
 	"github.com/chronodrachma/chrd/pkg/core/consensus"
+	"github.com/chronodrachma/chrd/pkg/core/mempool"
 	"github.com/chronodrachma/chrd/pkg/core/types"
 	"github.com/chronodrachma/chrd/pkg/miner"
 	"github.com/chronodrachma/chrd/pkg/p2p"
@@ -87,7 +88,7 @@ func startNode(listenAddr, seedAddr string, isMiner bool, minerAddr types.Hash) 
 	// OR just use SHA256 for now since I can't guarantee the C lib is present on the user's machine 
 	// right this second (even though they said they have it).
 	// Actually, the user SAID "Phase I (RandomX CGO) is fully implemented".
-	// So I should try to use it.
+	// I should try to use it.
 	
 	// However, `randomx.NewRandomXHasher` is guarded by build tags. 
 	// If I call it here, and the file is excluded, compilation fails.
@@ -104,10 +105,22 @@ func startNode(listenAddr, seedAddr string, isMiner bool, minerAddr types.Hash) 
 	hasher = consensus.NewSHA256Hasher() 
 	log.Println("WARNING: Using SHA256 hasher for prototype. Use -tags randomx for RandomX.")
 
-	// 2. Initialize Chain
-	chain := blockchain.NewChain(hasher)
+	// 2. Initialize Store & Chain
+	store, err := blockchain.NewBadgerStore("data") // Persistent storage in ./data
+	if err != nil {
+		log.Fatalf("Failed to open store: %v", err)
+	}
+	defer store.Close()
 
-	// 3. Init Genesis
+	chain, err := blockchain.NewChain(store, hasher)
+	if err != nil {
+		log.Fatalf("Failed to load chain: %v", err)
+	}
+
+	// 3. Initialize Mempool
+	mp := mempool.NewMempool(chain)
+
+	// 4. Init Genesis
 	// Initialize with testnet defaults
 	genesisTime := config.TestnetConfig.GenesisTimestamp
 	_, err = chain.InitGenesis(config.GenesisMinerAddress, config.TestnetConfig.InitialDifficulty, genesisTime)
@@ -115,7 +128,7 @@ func startNode(listenAddr, seedAddr string, isMiner bool, minerAddr types.Hash) 
 		log.Fatalf("Failed to init genesis: %v", err)
 	}
 
-	// 4. Initialize P2P Server
+	// 5. Initialize P2P Server
 	seeds := []string{}
 	if seedAddr != "" {
 		seeds = append(seeds, seedAddr)
@@ -125,14 +138,14 @@ func startNode(listenAddr, seedAddr string, isMiner bool, minerAddr types.Hash) 
 		ListenAddr: listenAddr,
 		SeedNodes:  seeds,
 	}
-	server := p2p.NewServer(p2pConfig, chain)
+	server := p2p.NewServer(p2pConfig, chain, mp)
 	if err := server.Start(); err != nil {
 		log.Fatalf("Failed to start P2P server: %v", err)
 	}
 
-	// 5. Start Miner (if enabled)
+	// 6. Start Miner (if enabled)
 	if isMiner {
-		m := miner.NewMiner(chain, hasher, server, minerAddr)
+		m := miner.NewMiner(chain, hasher, server, mp, minerAddr)
 		m.Start()
 		defer m.Stop()
 	}

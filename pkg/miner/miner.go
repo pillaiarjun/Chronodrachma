@@ -10,6 +10,7 @@ import (
 
 	"github.com/chronodrachma/chrd/pkg/core/blockchain"
 	"github.com/chronodrachma/chrd/pkg/core/consensus"
+	"github.com/chronodrachma/chrd/pkg/core/mempool"
 	"github.com/chronodrachma/chrd/pkg/core/types"
 	"github.com/chronodrachma/chrd/pkg/p2p"
 )
@@ -18,16 +19,18 @@ type Miner struct {
 	chain     *blockchain.Chain
 	hasher    consensus.Hasher // Must be initialized for mining (e.g. RandomX dataset)
 	p2pServer *p2p.Server
+	mempool   *mempool.Mempool
 	address   types.Hash // Miner's address for coinbase
 	quit      chan struct{}
 	wg        sync.WaitGroup
 }
 
-func NewMiner(chain *blockchain.Chain, hasher consensus.Hasher, p2pServer *p2p.Server, address types.Hash) *Miner {
+func NewMiner(chain *blockchain.Chain, hasher consensus.Hasher, p2pServer *p2p.Server, mp *mempool.Mempool, address types.Hash) *Miner {
 	return &Miner{
 		chain:     chain,
 		hasher:    hasher,
 		p2pServer: p2pServer,
+		mempool:   mp,
 		address:   address,
 		quit:      make(chan struct{}),
 	}
@@ -85,6 +88,11 @@ func (m *Miner) miningLoop() {
 
 				// 6. Broadcast
 				m.p2pServer.Broadcast(&p2p.MsgBlock{Block: block})
+				
+				// 7. Remove included transactions from mempool
+				// Note: Ideally this happens via chain event or checking block, 
+				// but MINER knows it included them.
+				m.mempool.RemoveTransactions(block.Transactions[1:]) // Skip coinbase
 			}
 		}
 	}
@@ -110,7 +118,11 @@ func (m *Miner) createBlockTemplate(parent *types.Block, difficulty uint64) *typ
 	coinbase.ID = coinbase.ComputeID()
 
 	txs := []*types.Transaction{coinbase}
-	// TODO: Include transactions from mempool
+	
+	// Include transactions from mempool
+	// Limit to ~1000 for prototype
+	pending := m.mempool.GetPendingTransactions(1000)
+	txs = append(txs, pending...)
 
 	header := types.BlockHeader{
 		Version:       1,

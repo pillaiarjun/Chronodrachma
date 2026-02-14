@@ -6,12 +6,14 @@ import (
 	"sync"
 
 	"github.com/chronodrachma/chrd/pkg/core/blockchain"
+	"github.com/chronodrachma/chrd/pkg/core/mempool"
 )
 
 // Server manages the P2P network.
 type Server struct {
 	Config     ServerConfig
 	Chain      *blockchain.Chain
+	Mempool    *mempool.Mempool
 	peers      map[string]*Peer
 	peerMu     sync.RWMutex
 	listener   net.Listener
@@ -23,12 +25,13 @@ type ServerConfig struct {
 	SeedNodes  []string
 }
 
-func NewServer(config ServerConfig, chain *blockchain.Chain) *Server {
+func NewServer(config ServerConfig, chain *blockchain.Chain, mp *mempool.Mempool) *Server {
 	return &Server{
-		Config: config,
-		Chain:  chain,
-		peers:  make(map[string]*Peer),
-		quit:   make(chan struct{}),
+		Config:  config,
+		Chain:   chain,
+		Mempool: mp,
+		peers:   make(map[string]*Peer),
+		quit:    make(chan struct{}),
 	}
 }
 

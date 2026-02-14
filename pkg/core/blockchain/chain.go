@@ -14,22 +14,41 @@ var (
 	ErrBlockNotFound           = errors.New("block not found")
 )
 
-// Chain represents the in-memory blockchain state.
+// Chain represents the blockchain state backed by persistent storage.
 type Chain struct {
-	mu           sync.RWMutex
-	blocks       []*types.Block
-	blocksByHash map[types.Hash]*types.Block
-	tip          *types.Block
-	hasher       consensus.Hasher
-	genesisTime  time.Time
+	mu          sync.RWMutex
+	store       BlockStore
+	tip         *types.Block
+	hasher      consensus.Hasher
+	genesisTime time.Time
 }
 
-// NewChain creates a new empty chain with the given hasher.
-func NewChain(hasher consensus.Hasher) *Chain {
-	return &Chain{
-		blocksByHash: make(map[types.Hash]*types.Block),
-		hasher:       hasher,
+// NewChain creates a new chain instance.
+// Now it takes a store instead of creating internal maps.
+func NewChain(store BlockStore, hasher consensus.Hasher) (*Chain, error) {
+	chain := &Chain{
+		store:  store,
+		hasher: hasher,
 	}
+
+	// Try to load tip from store
+	headHash, err := store.GetHead()
+	if err == nil {
+		// Chain exists, load tip block
+		tip, err := store.GetBlockByHash(headHash)
+		if err != nil {
+			return nil, err
+		}
+		chain.tip = tip
+		// Ideally load genesis time too, but for prototype we can fetch block 0?
+		// For now, let's just leave genesisTime 0 if not init, or fetch it.
+		genesis, err := store.GetBlockByHeight(0)
+		if err == nil {
+			chain.genesisTime = genesis.Header.Timestamp
+		}
+	}
+
+	return chain, nil
 }
 
 // InitGenesis creates, validates, and adds the genesis block to the chain.
@@ -37,8 +56,9 @@ func (c *Chain) InitGenesis(minerAddress types.Hash, difficulty uint64, timestam
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.blocks) > 0 {
-		return nil, ErrChainAlreadyInitialized
+	// Check if already initialized
+	if c.tip != nil {
+		return c.tip, ErrChainAlreadyInitialized
 	}
 
 	// Create coinbase transaction.
@@ -87,9 +107,14 @@ func (c *Chain) InitGenesis(minerAddress types.Hash, difficulty uint64, timestam
 		return nil, err
 	}
 
-	// Add to chain.
-	c.blocks = append(c.blocks, block)
-	c.blocksByHash[block.Hash] = block
+	// Save to store
+	if err := c.store.SaveBlock(block); err != nil {
+		return nil, err
+	}
+	if err := c.store.SaveHead(block.Hash); err != nil {
+		return nil, err
+	}
+
 	c.tip = block
 	c.genesisTime = timestamp
 
@@ -101,19 +126,22 @@ func (c *Chain) AddBlock(block *types.Block) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.blocks) == 0 {
+	if c.tip == nil {
 		return errors.New("chain not initialized: no genesis block")
 	}
 
 	parent := c.tip
 
 	// Verify difficulty adjustment (Contextual/Consensus Rule).
-	// We use an internal lookup to avoid deadlocks (AddBlock holds the lock).
+	// We use an internal lookup to avoid deadlocks (AddBlock holds the lock, but store is thread safe or we use read methods).
+	// However, CalcNextRequiredDifficulty needs a callback.
 	getBlockInternal := func(h uint64) (*types.Block, error) {
-		if h >= uint64(len(c.blocks)) {
-			return nil, ErrBlockNotFound
+		// Optimization: if h is current tip height, return tip
+		if h == c.tip.Header.Height {
+			return c.tip, nil
 		}
-		return c.blocks[h], nil
+		// Otherwise fetch from store
+		return c.store.GetBlockByHeight(h)
 	}
 
 	requiredDiff, err := consensus.CalcNextRequiredDifficulty(parent, getBlockInternal)
@@ -122,10 +150,6 @@ func (c *Chain) AddBlock(block *types.Block) error {
 	}
 
 	if block.Header.Difficulty != requiredDiff {
-		// return fmt.Errorf("incorrect difficulty: expected %d, got %d", requiredDiff, block.Header.Difficulty)
-		// To avoid importing fmt, we can use validation.ErrInvalidDifficulty if we define it, 
-		// but for now let's just use errors.New with a static message or just fail. 
-		// Actually, let's keep it simple and just return a new error.
 		return errors.New("block difficulty does not match required network difficulty")
 	}
 
@@ -133,8 +157,14 @@ func (c *Chain) AddBlock(block *types.Block) error {
 		return err
 	}
 
-	c.blocks = append(c.blocks, block)
-	c.blocksByHash[block.Hash] = block
+	// Save to store
+	if err := c.store.SaveBlock(block); err != nil {
+		return err
+	}
+	if err := c.store.SaveHead(block.Hash); err != nil {
+		return err
+	}
+
 	c.tip = block
 
 	return nil
@@ -142,25 +172,21 @@ func (c *Chain) AddBlock(block *types.Block) error {
 
 // GetBlockByHeight returns the block at the given height.
 func (c *Chain) GetBlockByHeight(height uint64) (*types.Block, error) {
+	// Optimization: check tip first
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	tip := c.tip
+	c.mu.RUnlock()
 
-	if height >= uint64(len(c.blocks)) {
-		return nil, ErrBlockNotFound
+	if tip != nil && tip.Header.Height == height {
+		return tip, nil
 	}
-	return c.blocks[height], nil
+	
+	return c.store.GetBlockByHeight(height)
 }
 
 // GetBlockByHash returns the block with the given hash.
 func (c *Chain) GetBlockByHash(hash types.Hash) (*types.Block, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	block, ok := c.blocksByHash[hash]
-	if !ok {
-		return nil, ErrBlockNotFound
-	}
-	return block, nil
+	return c.store.GetBlockByHash(hash)
 }
 
 // Tip returns the current chain tip.
@@ -188,4 +214,82 @@ func (c *Chain) TotalSupply() types.Amount {
 		return 0
 	}
 	return TotalSupplyAtHeight(c.tip.Header.Height)
+}
+
+// GetAccountState calculates the balance and nonce for a given address
+// by scanning the entire blockchain history (Prototype: O(N)).
+func (c *Chain) GetAccountState(addr types.Hash) (types.Amount, uint64, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var balance types.Amount
+	var nonce uint64
+	currentHeight := uint64(0)
+	if c.tip != nil {
+		currentHeight = c.tip.Header.Height
+	}
+
+	// Iterate from genesis to tip
+	for h := uint64(0); h <= currentHeight; h++ {
+		// Optimization: We could cache UTXOs/State, but for now we look up.
+		// Note: We use GetBlockByHeight which uses the store.
+		// Internal method to avoid deadlock if we were calling public method (but we are holding lock).
+		// Wait, GetBlockByHeight acquires lock?
+		// Chain.GetBlockByHeight:
+		// c.mu.RLock() ... defer Match.
+		// Recursion on RLock is OK?
+		// Go RWMutex: "If a goroutine holds a RWMutex for reading and another goroutine might verify... no."
+		// "A RWMutex is NOT recursive."
+		// calling c.GetBlockByHeight() inside c.GetAccountState() (which holds RLock) WILL DEADLOCK if GetBlockByHeight tries to RLock.
+		// Yes, `GetBlockByHeight` does `c.mu.RLock()`.
+		// So we must NOT call `c.GetBlockByHeight`.
+		// We should call `c.store.GetBlockByHeight(h)` directly.
+		
+		block, err := c.store.GetBlockByHeight(h)
+		if err != nil {
+			// If not found (and h <= currentHeight), something is wrong or tip moved?
+			// We held RLock, so structure shouldn't change, but store might?
+			// Generally safe to assume it exists.
+			if err == ErrBlockNotFound {
+				break
+			}
+			return 0, 0, err
+		}
+
+		for _, tx := range block.Transactions {
+			// 1. Credits
+			if tx.To == addr {
+				if tx.Type == types.TxTypeCoinbase {
+					// Check Maturity
+					if IsMature(block.Header.Height, currentHeight) {
+						balance += tx.Amount
+					}
+				} else {
+					// Standard transfer
+					balance += tx.Amount
+				}
+			}
+
+			// 2. Debits (Sent transactions)
+			if tx.From == addr {
+				// Amount + Fee
+				// Check for underflow? logic: balance -= (Amount + Fee)
+				totalDebit := tx.Amount + tx.Fee
+				if balance < totalDebit {
+					// Should not happen in valid chain, but safe to clamp or allow negative?
+					// In a valid chain, this tx wouldn't exist if balance was insufficient.
+					// However, if we are recalculating state, maybe it goes negative?
+					// Or maybe we received funds in same block?
+					// Order matters? "In a block, transactions apply in order"?
+					// We are iterating txs in order.
+					// So it should be fine.
+					// balance -= totalDebit
+				}
+				balance -= totalDebit
+				nonce++
+			}
+		}
+	}
+
+	return balance, nonce, nil
 }
