@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/chronodrachma/chrd/pkg/core/blockchain"
@@ -32,13 +33,97 @@ func (s *Server) Start(port string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/balance", s.handleBalance)
 	mux.HandleFunc("/tx", s.handleTx)
-
-	// Add a simple status endpoint
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Chronodrachma Node Running. Height: %d", s.chain.Height())
-	})
+	mux.HandleFunc("/block/height", s.handleBlockByHeight)
+	mux.HandleFunc("/block/hash", s.handleBlockByHash)
+	mux.HandleFunc("/mempool", s.handleMempool)
+	mux.HandleFunc("/status", s.handleStatus)
 
 	return http.ListenAndServe(port, mux)
+}
+
+// GET /status
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	tip := s.chain.Tip()
+	height := uint64(0)
+	tipHash := types.Hash{}
+	if tip != nil {
+		height = tip.Header.Height
+		tipHash = tip.Hash
+	}
+
+	resp := struct {
+		Height      uint64       `json:"height"`
+		TipHash     types.Hash   `json:"tip_hash"`
+		TotalSupply types.Amount `json:"total_supply"`
+		MempoolSize int          `json:"mempool_size"`
+		PeerCount   int          `json:"peer_count"`
+	}{
+		Height:      height,
+		TipHash:     tipHash,
+		TotalSupply: s.chain.TotalSupply(),
+		MempoolSize: s.mempool.Size(),
+		PeerCount:   s.p2pServer.PeerCount(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// GET /block/height?h=<uint64>
+func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
+	hStr := r.URL.Query().Get("h")
+	if hStr == "" {
+		http.Error(w, "missing height parameter", http.StatusBadRequest)
+		return
+	}
+
+	height, err := strconv.ParseUint(hStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid height", http.StatusBadRequest)
+		return
+	}
+
+	block, err := s.chain.GetBlockByHeight(height)
+	if err != nil {
+		http.Error(w, "block not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(block)
+}
+
+// GET /block/hash?id=<hex>
+func (s *Server) handleBlockByHash(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		http.Error(w, "missing id parameter", http.StatusBadRequest)
+		return
+	}
+
+	hash, err := types.HashFromHex(idStr)
+	if err != nil {
+		http.Error(w, "invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	block, err := s.chain.GetBlockByHash(hash)
+	if err != nil {
+		http.Error(w, "block not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(block)
+}
+
+// GET /mempool
+func (s *Server) handleMempool(w http.ResponseWriter, r *http.Request) {
+	// Return up to 1000 txs
+	txs := s.mempool.GetPendingTransactions(1000)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(txs)
 }
 
 // GET /balance?addr=<hex>
@@ -72,6 +157,7 @@ func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 		Nonce:   nonce,
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -120,7 +206,7 @@ func (s *Server) handleTx(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid to address", http.StatusBadRequest)
 		return
 	}
-	
+
 	// Parse signature
 	sig, err := hex.DecodeString(req.Signature)
 	if err != nil {
@@ -140,7 +226,7 @@ func (s *Server) handleTx(w http.ResponseWriter, r *http.Request) {
 		Nonce:     req.Nonce,
 		Signature: sig,
 	}
-	
+
 	// Compute ID
 	tx.ID = tx.ComputeID()
 
@@ -153,5 +239,6 @@ func (s *Server) handleTx(w http.ResponseWriter, r *http.Request) {
 	// Broadcast via P2P
 	s.p2pServer.Broadcast(&p2p.MsgTx{Tx: tx})
 
+	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, "{\"status\": \"ok\", \"txid\": \"%x\"}", tx.ID)
 }

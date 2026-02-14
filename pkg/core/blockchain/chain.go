@@ -469,6 +469,28 @@ func (c *Chain) Height() uint64 {
 	return c.tip.Header.Height
 }
 
+// GetBlocksRange returns a slice of blocks starting from startHeight up to limit.
+// Returns fewer blocks if the end of the chain is reached.
+func (c *Chain) GetBlocksRange(startHeight uint64, limit int) ([]*types.Block, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var blocks []*types.Block
+	for i := 0; i < limit; i++ {
+		height := startHeight + uint64(i)
+		if c.tip == nil || height > c.tip.Header.Height {
+			break
+		}
+
+		block, err := c.store.GetBlockByHeight(height)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block at height %d: %v", height, err)
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks, nil
+}
+
 // TotalSupply returns the total CHRD emitted up to the current chain tip.
 func (c *Chain) TotalSupply() types.Amount {
 	c.mu.RLock()

@@ -11,13 +11,13 @@ import (
 
 // Server manages the P2P network.
 type Server struct {
-	Config     ServerConfig
-	Chain      *blockchain.Chain
-	Mempool    *mempool.Mempool
-	peers      map[string]*Peer
-	peerMu     sync.RWMutex
-	listener   net.Listener
-	quit       chan struct{}
+	Config   ServerConfig
+	Chain    *blockchain.Chain
+	Mempool  *mempool.Mempool
+	peers    map[string]*Peer
+	peerMu   sync.RWMutex
+	listener net.Listener
+	quit     chan struct{}
 }
 
 type ServerConfig struct {
@@ -97,14 +97,14 @@ func (s *Server) addPeer(conn net.Conn, outbound bool) {
 		BlockHeight: s.Chain.Height(),
 		From:        s.Config.ListenAddr,
 	})
-	
+
 	log.Printf("Peer connected: %s (outbound=%v)", addr, outbound)
 }
 
 func (s *Server) RemovePeer(p *Peer) {
 	s.peerMu.Lock()
 	defer s.peerMu.Unlock()
-	
+
 	addr := p.Conn.RemoteAddr().String()
 	delete(s.peers, addr)
 	p.Stop()
@@ -118,4 +118,11 @@ func (s *Server) Broadcast(msg Message) {
 	for _, p := range s.peers {
 		go p.Send(msg)
 	}
+}
+
+// PeerCount returns the number of connected peers.
+func (s *Server) PeerCount() int {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	return len(s.peers)
 }

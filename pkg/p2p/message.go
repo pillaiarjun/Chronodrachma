@@ -12,9 +12,11 @@ import (
 type MessageType byte
 
 const (
-	MsgTypeVersion MessageType = 0x01
-	MsgTypeBlock   MessageType = 0x02
-	MsgTypeTx      MessageType = 0x03
+	MsgTypeVersion   MessageType = 0x01
+	MsgTypeBlock     MessageType = 0x02
+	MsgTypeTx        MessageType = 0x03
+	MsgTypeGetBlocks MessageType = 0x04
+	MsgTypeBlocks    MessageType = 0x05
 )
 
 // Message is the generic interface for all P2P messages.
@@ -45,6 +47,20 @@ type MsgTx struct {
 
 func (m *MsgTx) Type() MessageType { return MsgTypeTx }
 
+// MsgGetBlocks requests blocks starting from a specific height.
+type MsgGetBlocks struct {
+	FromHeight uint64
+}
+
+func (m *MsgGetBlocks) Type() MessageType { return MsgTypeGetBlocks }
+
+// MsgBlocks sends a batch of blocks.
+type MsgBlocks struct {
+	Blocks []*types.Block
+}
+
+func (m *MsgBlocks) Type() MessageType { return MsgTypeBlocks }
+
 // EncodeMessage writes a message to the writer using Gob encoding.
 // Format: [Type(1)][Payload(Gob)]
 func EncodeMessage(w io.Writer, msg Message) error {
@@ -74,6 +90,10 @@ func DecodeMessage(r io.Reader) (Message, error) {
 		msg = &MsgBlock{}
 	case MsgTypeTx:
 		msg = &MsgTx{}
+	case MsgTypeGetBlocks:
+		msg = &MsgGetBlocks{}
+	case MsgTypeBlocks:
+		msg = &MsgBlocks{}
 	default:
 		return nil, fmt.Errorf("unknown message type: 0x%x", typeBuf[0])
 	}
@@ -92,6 +112,8 @@ func init() {
 	gob.Register(&MsgVersion{})
 	gob.Register(&MsgBlock{})
 	gob.Register(&MsgTx{})
+	gob.Register(&MsgGetBlocks{})
+	gob.Register(&MsgBlocks{})
 	gob.Register(types.Block{})
 	gob.Register(types.Transaction{})
 	gob.Register(types.BlockHeader{})
