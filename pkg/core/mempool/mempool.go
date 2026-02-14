@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sort"
 	"sync"
-	"time" // Added missing import for time.Now()
 
 	"github.com/chronodrachma/chrd/pkg/core/blockchain"
 	"github.com/chronodrachma/chrd/pkg/core/types"
