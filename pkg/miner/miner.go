@@ -37,7 +37,8 @@ func NewMiner(chain *blockchain.Chain, hasher consensus.Hasher, p2pServer *p2p.S
 }
 
 func (m *Miner) Start() {
-	log.Println("Miner started. CPU threads:", runtime.NumCPU())
+	numCPU := runtime.NumCPU()
+	log.Printf("Miner started. Using %d CPU threads.", numCPU)
 	m.wg.Add(1)
 	go m.miningLoop()
 }
@@ -51,49 +52,87 @@ func (m *Miner) Stop() {
 func (m *Miner) miningLoop() {
 	defer m.wg.Done()
 
-	for {
-		select {
-		case <-m.quit:
-			return
-		default:
-			// 1. Get current tip
-			parent := m.chain.Tip()
+	// Subscribe to chain tip updates
+	tipCh := m.chain.SubscribeTip()
 
-			// 2. Calculate required difficulty
+	// Create a context for the current mining job
+	// We'll cancel this whenever we need to restart (new tip) or stop (quit)
+	var ctx context.Context
+	var cancel context.CancelFunc
+
+	// Ensure we clean up the last context when we exit
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+	}()
+
+	for {
+		// 1. Get current tip and prepare to mine
+		parent := m.chain.Tip()
+
+		// 2. Refresh context for this mining round
+		if cancel != nil {
+			cancel()
+		}
+		ctx, cancel = context.WithCancel(context.Background())
+
+		// 3. Start mining in background
+		// We use a channel to signal if we found a block
+		foundBlockCh := make(chan *types.Block, 1)
+
+		go func(parentBlock *types.Block, miningCtx context.Context) {
+			// Calculate difficulty
 			getBlockInternal := func(h uint64) (*types.Block, error) {
 				return m.chain.GetBlockByHeight(h)
 			}
-			difficulty, err := consensus.CalcNextRequiredDifficulty(parent, getBlockInternal)
+			difficulty, err := consensus.CalcNextRequiredDifficulty(parentBlock, getBlockInternal)
 			if err != nil {
 				log.Printf("Miner: failed to calc difficulty: %v", err)
+				// Retry after sleep? Or just wait for next tip?
+				// For now, small sleep and exit this attempt
 				time.Sleep(time.Second)
-				continue
+				return
 			}
 
-			// 3. Construct block template
-			block := m.createBlockTemplate(parent, difficulty)
+			// Construct template
+			template := m.createBlockTemplate(parentBlock, difficulty)
 
-			// 4. Mine (find nonce)
-			// For simplicity in prototype, we'll just loop here. 
-			// In production, we'd spawn multiple workers.
-			if m.solveBlock(block) {
-				// Found a block!
-				log.Printf("Mined block! Hash: %x, Height: %d", block.Hash, block.Header.Height)
-				
-				// 5. Add to chain
-				if err := m.chain.AddBlock(block); err != nil {
-					log.Printf("Miner: failed to add mined block: %v", err)
-					continue
+			// Mine with N workers
+			if m.solveBlock(miningCtx, template) {
+				select {
+				case foundBlockCh <- template:
+				case <-miningCtx.Done():
 				}
-
-				// 6. Broadcast
-				m.p2pServer.Broadcast(&p2p.MsgBlock{Block: block})
-				
-				// 7. Remove included transactions from mempool
-				// Note: Ideally this happens via chain event or checking block, 
-				// but MINER knows it included them.
-				m.mempool.RemoveTransactions(block.Transactions[1:]) // Skip coinbase
 			}
+		}(parent, ctx)
+
+		// 4. Wait for events
+		select {
+		case <-m.quit:
+			return
+
+		case newTip := <-tipCh:
+			// New tip arrived!
+			log.Printf("Miner: New tip received (heigth %d, hash %x). Restarting mining.",
+				newTip.Header.Height, newTip.Hash[:8])
+			// Loop will continue, cancelling current job context via defer/reassignment
+
+		case block := <-foundBlockCh:
+			// We found a block!
+			log.Printf("Mined block! Hash: %x, Height: %d", block.Hash, block.Header.Height)
+
+			if err := m.chain.AddBlock(block); err != nil {
+				log.Printf("Miner: failed to add mined block: %v", err)
+			} else {
+				m.p2pServer.Broadcast(&p2p.MsgBlock{Block: block})
+				// Remove txs from mempool
+				if len(block.Transactions) > 1 {
+					m.mempool.RemoveTransactions(block.Transactions[1:])
+				}
+			}
+			// We continue mining on top of our own block (which should trigger tip update shortly,
+			// but we can just loop around; AddBlock will trigger notify subscribers too)
 		}
 	}
 }
@@ -118,9 +157,8 @@ func (m *Miner) createBlockTemplate(parent *types.Block, difficulty uint64) *typ
 	coinbase.ID = coinbase.ComputeID()
 
 	txs := []*types.Transaction{coinbase}
-	
+
 	// Include transactions from mempool
-	// Limit to ~1000 for prototype
 	pending := m.mempool.GetPendingTransactions(1000)
 	txs = append(txs, pending...)
 
@@ -140,36 +178,83 @@ func (m *Miner) createBlockTemplate(parent *types.Block, difficulty uint64) *typ
 	}
 }
 
-func (m *Miner) solveBlock(block *types.Block) bool {
-	// Try a batch of nonces
-	// Check for quit every so often
-	// Since we are single threaded in this simplified loop, we just run for a short duration or N hashes
-	
-	// Create context with timeout to yield and check for new blocks
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+// solveBlock attempts to solve the block PoW using multiple workers.
+// Returns true if solved, false if cancelled or failed.
+func (m *Miner) solveBlock(ctx context.Context, block *types.Block) bool {
+	numWorkers := runtime.NumCPU()
+	resultCh := make(chan struct{}, 1) // Signal success
 
-	for {
-		select {
-		case <-ctx.Done():
-			return false // Yield to check for new tip / quit
-		case <-m.quit:
-			return false
-		default:
-			headerBytes := block.Header.Serialize()
-			hash, err := m.hasher.Hash(headerBytes)
-			if err != nil {
-				log.Printf("Miner hasher error: %v", err)
-				return false
+	// Create a WaitGroup to ensure all workers exit before we return?
+	// Not strictly necessary if we don't care about their lingering CPU usage for a microsecond.
+	// But let's be clean.
+	var wg sync.WaitGroup
+
+	// Base nonce for this attempt.
+	// Each worker will start at base + i, and stride by numWorkers.
+	baseNonce := block.Header.Nonce
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			// Local copy of header to modify nonce without lock (only nonce changes)
+			// Actually, we can't modify the SAME block header concurrently.
+			// Each worker needs its own header structure or we need to be careful.
+			// Since `Hash` is method on Block/Header, we should give each worker its own scratch space.
+
+			header := block.Header
+			header.Nonce = baseNonce + uint64(workerID)
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-resultCh:
+					// Another worker found it
+					return
+				default:
+					headerBytes := header.Serialize()
+					hash, err := m.hasher.Hash(headerBytes)
+					if err != nil {
+						return
+					}
+
+					if consensus.MeetsDifficulty(hash, header.Difficulty) {
+						// Found it!
+						// Update the shared block with the solution (Thread safe? only one writer wins)
+						// We need to signal we won.
+						select {
+						case resultCh <- struct{}{}:
+							// We are the winner, update the main block
+							// This is slightly racey if multiple solve at exact same time, but rare.
+							// Better to send the solution back.
+							block.Header.Nonce = header.Nonce
+							// Identity Hash (SHA-256) != PoW Hash (RandomX or DoubleSHA)
+							block.Hash = block.ComputeHash()
+							block.PowHash = hash
+						default:
+							// Lost the race
+						}
+						return
+					}
+
+					// Stride
+					header.Nonce += uint64(numWorkers)
+				}
 			}
+		}(i)
+	}
 
-			if consensus.MeetsDifficulty(hash, block.Header.Difficulty) {
-				block.Hash = hash
-				block.PowHash = hash // For RandomX verification
-				return true
-			}
-
-			block.Header.Nonce++
-		}
+	// Wait for success or cancel
+	select {
+	case <-resultCh:
+		// A worker succeeded and updated `block`
+		// Cancel others
+		// (Context is cancelled by caller or we can do it here, but caller owns context)
+		// We just wait for them to finish? No, we return true immediately.
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }

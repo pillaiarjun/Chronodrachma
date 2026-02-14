@@ -114,24 +114,20 @@ func printUsage() {
 func startNode(listenAddr, seedAddr, rpcPort string, isMiner bool, minerAddr types.Hash) {
 	log.Printf("Starting Chronodrachma Node (Testnet)...")
 
-	hasher := consensus.NewSHA256Hasher() 
-	log.Println("WARNING: Using SHA256 hasher for prototype. Use -tags randomx for RandomX.")
+	// Initialize Hasher (SHA256 or RandomX based on build tags)
+	// Use a fixed seed for prototype. In production, seed comes from block height % N.
+	seed := make([]byte, 32)
+	hasher, err := consensus.NewHasher(seed, isMiner)
+	if err != nil {
+		log.Fatalf("Failed to initialize hasher: %v", err)
+	}
+	defer hasher.Close()
 
-	store, err := blockchain.NewBadgerStore("data_" + rpcPort) // Use unique DB for different ports for testing locally?
-	// Or just "data" if mostly one node. Let's use clean separate DBs if testing locally with multiple nodes.
-	// But CLI should probably not force this. Let's use "data" + user defined suffix?
-	// For simplicity, let's just use "data" if port 8080, "data_miner" if 8081?
-	// Actually, best practice is a flag for --datadir.
-	// For now, let's hack it: if port is 8081 (miner default), use data_miner.
 	dbPath := "data"
 	if rpcPort == ":8081" {
 		dbPath = "data_miner"
 	}
-	
-	if err != nil { // Wait, err defined above? No. store, err := ...
-		// Go shadowing.
-	}
-	
+
 	s, err := blockchain.NewBadgerStore(dbPath)
 	if err != nil {
 		log.Fatalf("Failed to open store: %v", err)
@@ -223,7 +219,7 @@ func handleSend(rpcUrl, keyFile, toHex string, amount, fee uint64) {
 	if err != nil {
 		log.Fatalf("Failed to load key: %v", err)
 	}
-	
+
 	// Derive public key (last 32 bytes of priv key in Ed25519)
 	// ed25519.PrivateKey is 64 bytes: 32 bytes seed + 32 bytes pubkey.
 	if len(privKey) != ed25519.PrivateKeySize {
@@ -238,7 +234,7 @@ func handleSend(rpcUrl, keyFile, toHex string, amount, fee uint64) {
 		log.Fatalf("RPC error getting nonce: %v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	var balanceResp struct {
 		Balance types.Amount `json:"balance"`
 		Nonce   uint64       `json:"nonce"`
@@ -288,7 +284,7 @@ func handleSend(rpcUrl, keyFile, toHex string, amount, fee uint64) {
 		"signature": hex.EncodeToString(tx.Signature),
 		"timestamp": tx.Timestamp.Unix(),
 	}
-	
+
 	jsonBody, _ := json.Marshal(req)
 	txResp, err := http.Post(fmt.Sprintf("%s/tx", rpcUrl), "application/json", bytes.NewBuffer(jsonBody))
 	if err != nil {
